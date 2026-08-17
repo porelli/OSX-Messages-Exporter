@@ -212,6 +212,10 @@ $version_statement->execute();
 
 $updated_contacts_memo = array();
 
+# Local patch: count what we actually read from the source, so a run that
+# captures nothing can be reported instead of silently succeeding.
+$source_message_count = 0;
+
 if ( ! isset( $options['r'] ) ) {
 	$chat_db_path = $_SERVER['HOME'] . "/Library/Messages/chat.db";
 
@@ -281,6 +285,8 @@ if ( ! isset( $options['r'] ) ) {
 		$messages = $statement->execute();
 
 		while ( $message = $messages->fetchArray( SQLITE3_ASSOC ) ) {
+			++$source_message_count; // Local patch.
+
 			if ( empty( $message['text'] ) ) {
 				$message['text'] = '';
 			}
@@ -343,7 +349,7 @@ if ( ! isset( $options['r'] ) ) {
 				}
 			}
 
-			if ( strpos( $chat_title, ', ' ) === false && ! isset( $updated_contacts_memo[ $message['contact'] ] ) ) {
+			if ( strpos( $chat_title, ', ' ) === false && ! isset( $updated_contacts_memo[ $message['contact'] ?? '' ] ) ) {
 				// Get all existing chat names for this contact ID.
 				// If the contact name has changed, update it for old messages and update the folder and filenames.
 				$stored_messages_statement = $temp_db->prepare( "SELECT chat_title FROM messages WHERE contact=:contact GROUP BY chat_title" );
@@ -399,7 +405,7 @@ if ( ! isset( $options['r'] ) ) {
 					}
 				}
 
-				$updated_contacts_memo[ $message['contact'] ] = true;
+				$updated_contacts_memo[ $message['contact'] ?? '' ] = true;
 			}
 
 			// 0xfffc is the Object Replacement Character. Messages uses it as a placeholder for the image attachment, but we can strip it out because we process attachments separately.
@@ -791,15 +797,19 @@ while ( $message = $messages->fetchArray() ) {
 	$output .= "<br />\n";
 
 	file_put_contents(
-		$html_file,
+		get_staging_file( $html_file ), // Local patch: stage, then commit only if changed.
 		$output,
 		$write_mode
 	);
 }
 
 foreach ( $files_started as $html_file => $meta ) {
-	file_put_contents( $html_file, "\t</body>\n</html>", FILE_APPEND );
+	file_put_contents( get_staging_file( $html_file ), "\t</body>\n</html>", FILE_APPEND ); // Local patch.
 }
+
+# --- BEGIN local patch: incremental HTML writes and capture reporting ---
+commit_staged_html_files( array_keys( $files_started ) );
+# --- END local patch ---
 
 foreach ( $leftover_files_to_delete as $file_to_delete ) {
 	unlink( $file_to_delete );
@@ -809,6 +819,27 @@ foreach ( $leftover_files_to_delete as $file_to_delete ) {
 if ( count( $leftover_files_to_delete ) > 0 ) {
 	echo "Deleted " . count( $leftover_files_to_delete ) . " duplicate files.\n";
 }
+
+# --- BEGIN local patch: report a run that captured nothing ---
+#
+# The export is finished at this point, so the backup and the HTML files are
+# consistent either way. But if the source database yielded no messages at all,
+# the run captured nothing and the caller needs to know: exiting 0 here is what
+# let a broken Messages sync go unnoticed for weeks.
+if ( ! isset( $options['r'] ) ) {
+	echo "Read " . $source_message_count . " message(s) from " . $chat_db_path . ".\n";
+
+	if ( 0 === $source_message_count ) {
+		file_put_contents(
+			'php://stderr',
+			"Error: read 0 messages from " . $chat_db_path . ".\n"
+				. "The backup was not updated. The source database has conversations but no message\n"
+				. "bodies, which usually means Messages has not downloaded them from iCloud.\n"
+		);
+		exit( 1 );
+	}
+}
+# --- END local patch ---
 
 function get_contact_nicename( $contact_notnice_name ) {
 	static $contact_nicename_map = array();
@@ -1014,3 +1045,51 @@ function ensure_unique_row( $temp_db, $chat_title, $contact, $timestamp, $conten
 
 	return true;
 }
+
+# --- BEGIN local patch: incremental HTML writes ---
+#
+# The HTML for a conversation is identical from one run to the next unless that
+# conversation changed, but the renderer used to truncate and rewrite every file
+# regardless. That churned the modification time of every exported file on every
+# run, which defeats Time Machine, rsync and cloud sync.
+#
+# Instead, each file is written to a staging path and committed only when its
+# contents actually differ from what is already on disk.
+
+/**
+ * The path a conversation's HTML is written to before it is committed.
+ */
+function get_staging_file( $html_file ) {
+	return $html_file . '.new';
+}
+
+/**
+ * Replace each exported HTML file only if its staged contents differ.
+ *
+ * Unchanged files are left completely untouched, so their modification times
+ * still reflect when the conversation last changed.
+ */
+function commit_staged_html_files( $html_files ) {
+	$updated = 0;
+	$unchanged = 0;
+
+	foreach ( $html_files as $html_file ) {
+		$staging_file = get_staging_file( $html_file );
+
+		if ( ! file_exists( $staging_file ) ) {
+			continue;
+		}
+
+		if ( file_exists( $html_file ) && sha1_file( $staging_file ) === sha1_file( $html_file ) ) {
+			unlink( $staging_file );
+			++$unchanged;
+		}
+		else {
+			rename( $staging_file, $html_file );
+			++$updated;
+		}
+	}
+
+	echo $updated . " file(s) updated, " . $unchanged . " unchanged.\n";
+}
+# --- END local patch ---
