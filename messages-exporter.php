@@ -206,9 +206,13 @@ if ( $previous_version < 2 ) {
 	}
 }
 
-$version_statement = $temp_db->prepare( "INSERT INTO meta (meta_key, meta_value) VALUES ('version', :meta_value)" );
-$version_statement->bindValue( ':meta_value', VERSION, SQLITE3_TEXT );
-$version_statement->execute();
+# Only write the version when it changes, so that a run with nothing new to back up
+# doesn't modify the backup database.
+if ( $previous_version < VERSION ) {
+	$version_statement = $temp_db->prepare( "INSERT INTO meta (meta_key, meta_value) VALUES ('version', :meta_value)" );
+	$version_statement->bindValue( ':meta_value', VERSION, SQLITE3_TEXT );
+	$version_statement->execute();
+}
 
 $updated_contacts_memo = array();
 

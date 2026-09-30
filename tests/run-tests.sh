@@ -37,6 +37,11 @@ snapshot() {
 	find "$1" -maxdepth 1 -type f -name '*.html' -exec stat -f '%Fm %N' {} + | sort
 }
 
+# The modification times of an output directory itself and of its backup database.
+snapshot_backup() {
+	stat -f '%Fm %N' "$1" "$1/messages-exporter.db"
+}
+
 # The number of HTML files that were created or rewritten between two snapshots.
 count_changed() {
 	echo "$1" > "$WORK/snapshot"
@@ -163,17 +168,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "TEST 2: a re-run with no new messages leaves every HTML file untouched"
+echo "TEST 2: a re-run with no new messages leaves every HTML file and the backup database untouched"
 BEFORE="$(snapshot "$OUT")"
+BACKUP_BEFORE="$(snapshot_backup "$OUT")"
 sleep 1.1
 run_export "$OUT" "$DB" > "$WORK/run2.log" 2>&1
 EXIT=$?
 AFTER="$(snapshot "$OUT")"
+BACKUP_AFTER="$(snapshot_backup "$OUT")"
 
-if [ "$EXIT" -eq 0 ] && [ "$BEFORE" = "$AFTER" ] && grep -q '^0 HTML file(s) updated, 3 unchanged' "$WORK/run2.log"; then
-	pass "3 HTML files untouched"
+if [ "$EXIT" -eq 0 ] && [ "$BEFORE" = "$AFTER" ] && [ "$BACKUP_BEFORE" = "$BACKUP_AFTER" ] && grep -q '^0 HTML file(s) updated, 3 unchanged' "$WORK/run2.log"; then
+	pass "3 HTML files and the backup database untouched"
 else
-	fail "expected exit status 0 and no rewritten files; got status $EXIT and $(count_changed "$BEFORE" "$AFTER") rewritten file(s)"
+	fail "expected exit status 0 and nothing rewritten; got status $EXIT, $(count_changed "$BEFORE" "$AFTER") rewritten HTML file(s), and the backup database $([ "$BACKUP_BEFORE" = "$BACKUP_AFTER" ] && echo untouched || echo changed)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -209,17 +216,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "TEST 5: rebuilding from the backup database leaves unchanged files untouched"
+echo "TEST 5: rebuilding from the backup database leaves unchanged files and the database untouched"
 BEFORE="$(snapshot "$OUT")"
+BACKUP_BEFORE="$(snapshot_backup "$OUT")"
 sleep 1.1
 php_export -o "$OUT" -r > "$WORK/run5.log" 2>&1
 EXIT=$?
 AFTER="$(snapshot "$OUT")"
+BACKUP_AFTER="$(snapshot_backup "$OUT")"
 
-if [ "$EXIT" -eq 0 ] && [ "$BEFORE" = "$AFTER" ]; then
-	pass "3 HTML files untouched"
+if [ "$EXIT" -eq 0 ] && [ "$BEFORE" = "$AFTER" ] && [ "$BACKUP_BEFORE" = "$BACKUP_AFTER" ]; then
+	pass "3 HTML files and the backup database untouched"
 else
-	fail "expected exit status 0 and no rewritten files; got status $EXIT and $(count_changed "$BEFORE" "$AFTER") rewritten file(s)"
+	fail "expected exit status 0 and nothing rewritten; got status $EXIT, $(count_changed "$BEFORE" "$AFTER") rewritten HTML file(s), and the backup database $([ "$BACKUP_BEFORE" = "$BACKUP_AFTER" ] && echo untouched || echo changed)"
 fi
 
 # ---------------------------------------------------------------------------
