@@ -343,7 +343,9 @@ if ( ! isset( $options['r'] ) ) {
 				}
 			}
 
-			if ( strpos( $chat_title, ', ' ) === false && ! isset( $updated_contacts_memo[ $message['contact'] ] ) ) {
+			// The contact is null for messages that have no handle, and PHP 8.5 deprecates using null
+			// as an array key. An empty string is the key that PHP was converting null to anyway.
+			if ( strpos( $chat_title, ', ' ) === false && ! isset( $updated_contacts_memo[ $message['contact'] ?? '' ] ) ) {
 				// Get all existing chat names for this contact ID.
 				// If the contact name has changed, update it for old messages and update the folder and filenames.
 				$stored_messages_statement = $temp_db->prepare( "SELECT chat_title FROM messages WHERE contact=:contact GROUP BY chat_title" );
@@ -399,7 +401,7 @@ if ( ! isset( $options['r'] ) ) {
 					}
 				}
 
-				$updated_contacts_memo[ $message['contact'] ] = true;
+				$updated_contacts_memo[ $message['contact'] ?? '' ] = true;
 			}
 
 			// 0xfffc is the Object Replacement Character. Messages uses it as a placeholder for the image attachment, but we can strip it out because we process attachments separately.
