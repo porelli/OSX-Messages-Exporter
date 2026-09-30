@@ -160,10 +160,10 @@ run_export "$OUT" "$DB" > "$WORK/run1.log" 2>&1
 EXIT=$?
 COUNT="$(snapshot "$OUT" | grep -c .)"
 
-if [ "$EXIT" -eq 0 ] && [ "$COUNT" -eq 3 ] && [ -f "$OUT/$LONG_TITLE.html" ] && grep -q 'Sent message with no handle row.' "$ONE_TO_ONE_FILE"; then
-	pass "3 HTML files exported"
+if [ "$EXIT" -eq 0 ] && [ "$COUNT" -eq 3 ] && [ -f "$OUT/$LONG_TITLE.html" ] && grep -q 'Sent message with no handle row.' "$ONE_TO_ONE_FILE" && grep -q '^Read 6 message(s)' "$WORK/run1.log"; then
+	pass "6 messages read and 3 HTML files exported"
 else
-	fail "expected exit status 0 and 3 HTML files, including the long title and the message with no handle; got status $EXIT and $COUNT file(s)"
+	fail "expected exit status 0, \"Read 6 message(s)\" and 3 HTML files, including the long title and the message with no handle; got status $EXIT and $COUNT file(s)"
 	head -20 "$WORK/run1.log"
 fi
 
@@ -299,7 +299,61 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "TEST 10: no run, even one that failed, leaves files behind in the output or temporary directory"
+echo "TEST 10: a Messages database with no messages is reported as an error"
+EMPTY_DB="$WORK/empty.db"
+build_fixture "$EMPTY_DB"
+# Like a Messages database whose messages haven't been downloaded from iCloud: the
+# conversations are there, but none of their messages are. Export it on top of a copy
+# of the existing backup, which is where this happens in practice.
+sql "$EMPTY_DB" "DELETE FROM message; DELETE FROM chat_message_join;"
+cp -R "$OUT" "$WORK/empty-out"
+BEFORE="$(snapshot "$WORK/empty-out")"
+sleep 1.1
+run_export "$WORK/empty-out" "$EMPTY_DB" > /dev/null 2> "$WORK/empty.err"
+EXIT=$?
+AFTER="$(snapshot "$WORK/empty-out")"
+
+if [ "$EXIT" -eq 1 ] && [ "$BEFORE" = "$AFTER" ] && grep -q '^Error: No messages were read' "$WORK/empty.err"; then
+	pass "exited with status 1, explained why on stderr and left the exported files alone"
+else
+	fail "expected exit status 1, an error on stderr and no rewritten files; got status $EXIT"
+fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 11: a --match that matches no conversations is reported as an error"
+php_export -o "$WORK/match-out" -d "$DB" --match "Nobody" > /dev/null 2> "$WORK/match.err"
+EXIT=$?
+
+if [ "$EXIT" -eq 1 ] && grep -q -- '--match' "$WORK/match.err"; then
+	pass "exited with status 1 and suggested checking --match"
+else
+	fail "expected exit status 1 and a hint about --match; got status $EXIT"
+fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 12: a Messages database that doesn't exist is reported as an error"
+php_export -o "$WORK/missing-out" -d "$WORK/no-such.db" > /dev/null 2> "$WORK/missing.err"
+EXIT=$?
+
+if [ "$EXIT" -eq 1 ] && grep -q 'does not exist' "$WORK/missing.err"; then
+	pass "exited with status 1 and explained why on stderr"
+else
+	fail "expected exit status 1 and an error on stderr; got status $EXIT"
+fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 13: an invalid --timezone is reported as an error"
+php_export -o "$WORK/timezone-out" -d "$DB" --timezone "Not/A_Zone" > /dev/null 2> "$WORK/timezone.err"
+EXIT=$?
+
+if [ "$EXIT" -eq 1 ] && grep -q 'Invalid timezone identifier' "$WORK/timezone.err"; then
+	pass "exited with status 1 and explained why on stderr"
+else
+	fail "expected exit status 1 and an error on stderr; got status $EXIT"
+fi
+
+# ---------------------------------------------------------------------------
+echo "TEST 14: no run, even one that failed, leaves files behind in the output or temporary directory"
 STRAY="$(find "$OUT" -mindepth 1 -maxdepth 1 ! -name '*.html' ! -name 'messages-exporter.db'; find "$TMPDIR" -mindepth 1)"
 
 if [ -z "$STRAY" ]; then
@@ -309,8 +363,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "TEST 11: exporting prints no PHP warnings, notices or deprecations"
-WARNINGS="$(cat "$WORK"/run*.log | grep -iE 'deprecated|warning|notice|fatal')"
+echo "TEST 15: exporting prints no PHP warnings, notices or deprecations"
+WARNINGS="$(cat "$WORK"/run*.log "$WORK"/*.err | grep -iE 'deprecated|warning|notice|fatal')"
 
 if [ -z "$WARNINGS" ]; then
 	pass "no warnings"

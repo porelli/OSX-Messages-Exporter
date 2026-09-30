@@ -140,7 +140,7 @@ if ( ! empty( $options['t'] ) ) {
 		new DateTimeZone( $options['t'] );
 	} catch ( Exception $e ) {
 		file_put_contents('php://stderr', "Invalid timezone identifier: " . $options['t'] . "\n" );
-		die;
+		exit( 1 );
 	}
 
 	date_default_timezone_set( $options['t'] );
@@ -216,6 +216,10 @@ if ( $previous_version < VERSION ) {
 
 $updated_contacts_memo = array();
 
+# The number of messages read from the Messages database. An export that reads none
+# is reported as an error at the end.
+$source_message_count = 0;
+
 if ( ! isset( $options['r'] ) ) {
 	$chat_db_path = $_SERVER['HOME'] . "/Library/Messages/chat.db";
 
@@ -224,7 +228,8 @@ if ( ! isset( $options['r'] ) ) {
 	}
 
 	if ( ! file_exists( $chat_db_path ) ) {
-		die( "Error: The file " . $chat_db_path . " does not exist.\n" );
+		file_put_contents( 'php://stderr', "Error: The file " . $chat_db_path . " does not exist.\n" );
+		exit( 1 );
 	}
 
 	$db = new SQLite3( $chat_db_path, SQLITE3_OPEN_READONLY );
@@ -285,6 +290,8 @@ if ( ! isset( $options['r'] ) ) {
 		$messages = $statement->execute();
 
 		while ( $message = $messages->fetchArray( SQLITE3_ASSOC ) ) {
+			++$source_message_count;
+
 			if ( empty( $message['text'] ) ) {
 				$message['text'] = '';
 			}
@@ -555,6 +562,8 @@ if ( ! isset( $options['r'] ) ) {
 			}
 		}
 	}
+
+	echo "Read " . $source_message_count . " message(s) from " . $chat_db_path . ".\n";
 }
 
 do {
@@ -820,6 +829,21 @@ foreach ( $leftover_files_to_delete as $file_to_delete ) {
 
 if ( count( $leftover_files_to_delete ) > 0 ) {
 	echo "Deleted " . count( $leftover_files_to_delete ) . " duplicate files.\n";
+}
+
+if ( ! isset( $options['r'] ) && 0 === $source_message_count ) {
+	// Nothing new could have been backed up, so exit with an error status, which a
+	// script or scheduled job running the export can check for.
+	$error = "Error: No messages were read from " . $chat_db_path . ".\n";
+
+	if ( isset( $options['match'] ) || isset( $options['match_regex'] ) ) {
+		$error .= "Check that --match or --match_regex matches the title of at least one conversation.\n";
+	}
+
+	$error .= "If Messages in iCloud is turned on, your messages may not have been downloaded to this Mac yet.\n";
+
+	file_put_contents( 'php://stderr', $error );
+	exit( 1 );
 }
 
 if ( $html_files_not_updated > 0 ) {
