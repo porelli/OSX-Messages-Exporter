@@ -623,6 +623,7 @@ while ( $message = $messages->fetchArray() ) {
 
 		$files_started[ $html_file ]['last_time'] = 0;
 		$files_started[ $html_file ]['last_participant'] = null;
+		$files_started[ $html_file ]['write_failed'] = false;
 	}
 
 	$this_time = strtotime( $message['timestamp'] );
@@ -792,16 +793,21 @@ while ( $message = $messages->fetchArray() ) {
 
 	$output .= "<br />\n";
 
-	file_put_contents(
-		$html_file,
-		$output,
-		$write_mode
-	);
+	// The HTML goes into a staged copy first. See commit_staged_html_files().
+	if ( ! $files_started[ $html_file ]['write_failed'] && false === file_put_contents( get_staging_file( $html_file ), $output, $write_mode ) ) {
+		// If the disk is full, for example. The incomplete copy mustn't replace the
+		// exported file, so it won't be used, and there's no point writing more to it.
+		$files_started[ $html_file ]['write_failed'] = true;
+	}
 }
 
 foreach ( $files_started as $html_file => $meta ) {
-	file_put_contents( $html_file, "\t</body>\n</html>", FILE_APPEND );
+	if ( ! $meta['write_failed'] && false === file_put_contents( get_staging_file( $html_file ), "\t</body>\n</html>", FILE_APPEND ) ) {
+		$files_started[ $html_file ]['write_failed'] = true;
+	}
 }
+
+$html_files_not_updated = commit_staged_html_files( $files_started );
 
 foreach ( $leftover_files_to_delete as $file_to_delete ) {
 	unlink( $file_to_delete );
@@ -810,6 +816,11 @@ foreach ( $leftover_files_to_delete as $file_to_delete ) {
 
 if ( count( $leftover_files_to_delete ) > 0 ) {
 	echo "Deleted " . count( $leftover_files_to_delete ) . " duplicate files.\n";
+}
+
+if ( $html_files_not_updated > 0 ) {
+	file_put_contents( 'php://stderr', "Error: " . $html_files_not_updated . " HTML file(s) could not be updated.\n" );
+	exit( 1 );
 }
 
 function get_contact_nicename( $contact_notnice_name ) {
@@ -949,6 +960,108 @@ function get_attachments_directory( $chat_title_for_filesystem ) {
 	global $options;
 
 	return $options['o'] . $chat_title_for_filesystem . '/';
+}
+
+/**
+ * Where the HTML files are written before they're committed: a new directory for
+ * each run, in the system's temporary directory, that only the current user can read.
+ */
+function get_staging_directory() {
+	static $staging_directory = null;
+
+	if ( ! $staging_directory ) {
+		// A random name, so that nothing else can create it first.
+		$staging_directory = rtrim( sys_get_temp_dir(), DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR . 'messages-exporter-' . bin2hex( random_bytes( 8 ) ) . DIRECTORY_SEPARATOR;
+		mkdir( $staging_directory, 0700 );
+	}
+
+	return $staging_directory;
+}
+
+/**
+ * The path that an HTML file is written to before it's committed. It's named after
+ * a hash of the HTML file's path, so the name is never too long and is never shared.
+ */
+function get_staging_file( $html_file ) {
+	return get_staging_directory() . md5( $html_file ) . '.html';
+}
+
+/**
+ * Write each staged HTML file over the exported file, but only if the contents
+ * changed. Rewriting an unchanged file would only update its modification time,
+ * which makes backup and sync tools like Time Machine and rsync treat it as changed.
+ *
+ * Returns the number of HTML files that could not be updated.
+ */
+function commit_staged_html_files( $files_started ) {
+	$updated = 0;
+	$unchanged = 0;
+	$failed = 0;
+
+	foreach ( $files_started as $html_file => $meta ) {
+		$staging_file = get_staging_file( $html_file );
+
+		if ( $meta['write_failed'] ) {
+			// PHP will already have printed a warning about why.
+			++$failed;
+		}
+		else if ( file_exists( $html_file ) && sha1_file( $staging_file ) === sha1_file( $html_file ) ) {
+			++$unchanged;
+		}
+		else if ( overwrite_html_file( $staging_file, $html_file ) ) {
+			++$updated;
+		}
+		else {
+			++$failed;
+		}
+
+		if ( file_exists( $staging_file ) ) {
+			unlink( $staging_file );
+		}
+	}
+
+	// Only look for the staging directory if anything was staged, so it isn't created just to be removed.
+	if ( $files_started && is_dir( get_staging_directory() ) ) {
+		rmdir( get_staging_directory() );
+	}
+
+	echo $updated . " HTML file(s) updated, " . $unchanged . " unchanged.\n";
+
+	return $failed;
+}
+
+/**
+ * Write a staged HTML file over the exported file. Like copy(), this writes over the
+ * file in place, so it keeps its permissions and other attributes, as the export
+ * always did. But it doesn't truncate the file until all of the new contents have
+ * been written, so if they don't fit (because the disk is full, for example), the
+ * file isn't left empty or shorter than it was.
+ *
+ * Returns whether the whole file was written.
+ */
+function overwrite_html_file( $staging_file, $html_file ) {
+	$source = fopen( $staging_file, 'rb' );
+
+	if ( ! $source ) {
+		return false;
+	}
+
+	$size = fstat( $source )['size'];
+
+	// "c" opens the file for writing without truncating it.
+	$destination = fopen( $html_file, 'cb' );
+
+	$written = $destination
+		&& stream_copy_to_stream( $source, $destination ) === $size
+		&& ftruncate( $destination, $size );
+
+	fclose( $source );
+
+	if ( $destination ) {
+		$written = fclose( $destination ) && $written;
+	}
+
+	return $written;
 }
 
 /**
